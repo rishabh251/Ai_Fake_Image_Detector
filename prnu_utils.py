@@ -109,6 +109,7 @@ def noise_brightness_correlation(img, residual, patch_size=32):
     return float(r)
 
 
+
 def extract_patches(img, patch_size=128, stride=64):
     """
     Returns list of patches and their (y,x) coords
