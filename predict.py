@@ -8,91 +8,67 @@ from predict import predict_image
 prob = predict_image("/path/to/img.jpg", ckpt_path="checkpoints/best.pth")
 """
 
-import torch
-import torchvision.transforms as T
+import argparse
 from PIL import Image
-import numpy as np
-from typing import Union, Optional
-import os
+import torch
+import torch.nn as nn
+from torchvision import transforms, models
 
-# import model builder
-from model import build_model, load_checkpoint
 
-# Preprocessing transform: match ImageNet normalization & input size 224x224
-def get_transforms(size: int = 224):
-    return T.Compose([
-        T.Resize((size, size)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225])
+def load_model(ckpt_path, device):
+    model = models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, 2)
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    model.to(device)
+    model.eval()
+    return model
+
+
+def predict(image_path, model, device, img_size):
+    tfms = transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+transforms.ToTensor(),
+transforms.Normalize(
+    mean=[0.485, 0.456, 0.406],
+    std=[0.229, 0.224, 0.225]
+)
     ])
 
+    img = Image.open(image_path).convert("RGB")
+    img = tfms(img).unsqueeze(0).to(device)
 
-class Predictor:
-    def __init__(self, ckpt_path: Optional[str] = None, device: Optional[str] = None,
-                 backbone: str = "resnet50", input_size: int = 224):
-        """
-        If ckpt_path is None, model is randomly-initialized (useful for testing).
-        """
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = device
-        self.input_size = input_size
-        self.transforms = get_transforms(size=input_size)
+    with torch.no_grad():
+        outputs = model(img)
+        probs = torch.softmax(outputs, dim=1)[0]
 
-        # instantiate model
-        self.model = build_model(backbone=backbone, pretrained=False, num_classes=1)
-        self.model.to(self.device)
-        self.model.eval()
+    real_prob = probs[0].item()
+    ai_prob = probs[1].item()
 
-        self.ckpt_path = ckpt_path
-        if ckpt_path and os.path.exists(ckpt_path):
-            chk = load_checkpoint(ckpt_path, device=self.device)
-            # support key names 'model_state' or 'state_dict'
-            state = chk.get("model_state", chk.get("state_dict", chk))
-            try:
-                self.model.load_state_dict(state)
-            except RuntimeError:
-                # try non-strict loading if shapes mismatch
-                self.model.load_state_dict(state, strict=False)
-
-    @torch.no_grad()
-    def predict(self, pil_img: Union[str, Image.Image]) -> float:
-        """
-        Returns probability in 0..100
-        """
-        if isinstance(pil_img, str):
-            pil_img = Image.open(pil_img).convert("RGB")
-
-        x = self.transforms(pil_img).unsqueeze(0).to(self.device)  # 1x3xHxW
-        logits = self.model(x)  # shape: (1,) or (1,1)
-        if isinstance(logits, torch.Tensor):
-            logits = logits.detach().cpu().numpy().ravel()
-        # handle shapes robustly
-        val = float(np.atleast_1d(logits)[0])
-        prob = 1.0 / (1.0 + np.exp(-val))  # sigmoid
-        return float(prob * 100.0)
+    return real_prob, ai_prob
 
 
-# convenience function (module-level)
-_default_predictor = None
-def predict_image(img: Union[str, Image.Image], ckpt_path: Optional[str] = None,
-                  device: Optional[str] = None, backbone: str = "resnet50", input_size: int = 224) -> float:
-    global _default_predictor
-    if _default_predictor is None or (_default_predictor.ckpt_path != ckpt_path):
-        _default_predictor = Predictor(ckpt_path=ckpt_path, device=device, backbone=backbone, input_size=input_size)
-    return _default_predictor.predict(img)
+def main(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = load_model(args.ckpt, device)
+
+    real_p, ai_p = predict(args.image, model, device, args.img_size)
+
+    print("\n===== PREDICTION RESULT =====")
+    print(f"Real Image Probability : {real_p*100:.2f}%")
+    print(f"AI Image Probability   : {ai_p*100:.2f}%")
+
+    if ai_p > real_p:
+        print("Prediction: AI Generated Image")
+    else:
+        print("Prediction: Real Image")
 
 
-# simple CLI
 if __name__ == "__main__":
-    import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image", "-i", required=True, help="Image path")
-    parser.add_argument("--ckpt", "-c", default=None, help="Checkpoint path (optional)")
-    parser.add_argument("--backbone", default="resnet50", help="Backbone name")
-    parser.add_argument("--size", type=int, default=224, help="Input size")
-    args = parser.parse_args()
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--ckpt", default="checkpoints/best_model.pth")
+    parser.add_argument("--img_size", type=int, default=224)
 
-    prob = predict_image(args.image, ckpt_path=args.ckpt, backbone=args.backbone, input_size=args.size)
-    print(f"AI probability: {prob:.2f}%")
+    args = parser.parse_args()
+    main(args)
